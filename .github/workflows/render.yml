@@ -13,16 +13,17 @@ concurrency:
 
 permissions:
   contents: read
+  id-token: write
 
 # This public repository intentionally contains only this workflow.
-# Runtime requirements are stored as encrypted repository secrets:
-#   MV_RUNNER_TOKEN     Worker render token
-#   RENDER_SOURCE_TOKEN GitHub token that can read MohiZia/Metaverse
+# Runtime requirement: RENDER_SOURCE_TOKEN is an encrypted GitHub token that can
+# read MohiZia/Metaverse. Worker access uses short-lived GitHub OIDC instead of
+# a long-lived Worker token.
 # No credentials, application code, internal data, or publishing code is committed here.
 
 env:
   MV_API: ${{ vars.MV_API || 'https://metaverse-autopilot.zyyabot.workers.dev' }}
-  MV_RUNNER_TOKEN: ${{ secrets.MV_RUNNER_TOKEN }}
+  MV_OIDC_AUDIENCE: metaverse-autopilot
   MV_BUDGET_MIN: "45"
   MV_BATCH: "3"
 
@@ -36,8 +37,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test -n "$MV_RUNNER_TOKEN" || { echo 'MV_RUNNER_TOKEN secret is not configured'; exit 1; }
-          response="$(curl -fsS -H "Authorization: Bearer $MV_RUNNER_TOKEN" "$MV_API/api/runner/pending")"
+          oidc="$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$MV_OIDC_AUDIENCE" | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])')"
+          echo "::add-mask::$oidc"
+          response="$(curl -fsS -H "Authorization: Bearer $oidc" "$MV_API/api/runner/pending")"
           pending="$(python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("claimable", d.get("pending", 0)))' <<< "$response")"
           echo "Claimable render jobs: $pending"
           if [ "$pending" -gt 0 ]; then echo 'run=true' >> "$GITHUB_OUTPUT"; else echo 'run=false' >> "$GITHUB_OUTPUT"; fi
