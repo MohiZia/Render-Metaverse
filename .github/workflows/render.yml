@@ -1,0 +1,71 @@
+name: Render Metaverse backlog
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [render-metaverse]
+  schedule:
+    - cron: "20 */2 * * *"
+
+concurrency:
+  group: metaverse-renderer
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+# This public repository intentionally contains only this workflow.
+# Runtime requirements are stored as encrypted repository secrets:
+#   MV_RUNNER_TOKEN     Worker render token
+#   RENDER_SOURCE_TOKEN GitHub token that can read MohiZia/Metaverse
+# No credentials, application code, internal data, or publishing code is committed here.
+
+env:
+  MV_API: ${{ vars.MV_API || 'https://metaverse-autopilot.zyyabot.workers.dev' }}
+  MV_RUNNER_TOKEN: ${{ secrets.MV_RUNNER_TOKEN }}
+  MV_BUDGET_MIN: "45"
+  MV_BATCH: "3"
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - name: Check render backlog
+        id: backlog
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$MV_RUNNER_TOKEN" || { echo 'MV_RUNNER_TOKEN secret is not configured'; exit 1; }
+          response="$(curl -fsS -H "Authorization: Bearer $MV_RUNNER_TOKEN" "$MV_API/api/runner/pending")"
+          pending="$(python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("claimable", d.get("pending", 0)))' <<< "$response")"
+          echo "Claimable render jobs: $pending"
+          if [ "$pending" -gt 0 ]; then echo 'run=true' >> "$GITHUB_OUTPUT"; else echo 'run=false' >> "$GITHUB_OUTPUT"; fi
+
+      - name: Checkout only renderer modules from private source
+        if: steps.backlog.outputs.run == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: MohiZia/Metaverse
+          ref: main
+          token: ${{ secrets.RENDER_SOURCE_TOKEN }}
+          path: renderer-source
+          sparse-checkout: |
+            scripts/render_short.py
+            scripts/story_renderer.py
+            scripts/kids_music.py
+          sparse-checkout-cone-mode: false
+
+      - name: Install renderer dependencies
+        if: steps.backlog.outputs.run == 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg fonts-dejavu-core > /dev/null
+          python3 -m pip install --disable-pip-version-check -q edge-tts gTTS pillow numpy
+
+      - name: Render and upload queued videos
+        if: steps.backlog.outputs.run == 'true'
+        working-directory: renderer-source
+        env:
+          PYTHONPATH: scripts
+        run: python3 scripts/render_short.py
