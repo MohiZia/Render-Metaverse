@@ -29,7 +29,7 @@ env:
 
 jobs:
   render:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.01
     timeout-minutes: 55
     steps:
       - name: Check render backlog
