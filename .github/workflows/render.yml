@@ -56,6 +56,7 @@ jobs:
             scripts/render_short.py
             scripts/story_renderer.py
             scripts/kids_music.py
+            scripts/sfx.py
           sparse-checkout-cone-mode: false
 
       - name: Install renderer dependencies
