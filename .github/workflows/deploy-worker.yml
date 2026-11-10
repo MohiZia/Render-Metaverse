@@ -3,6 +3,10 @@ name: Deploy Metaverse Worker
 
 on:
   workflow_dispatch:
+  # Allows the connected GitHub App to start the same vetted deploy using its
+  # repository contents-write permission, without a personal token in chat.
+  repository_dispatch:
+    types: [deploy-metaverse-worker]
 
 concurrency:
   group: metaverse-worker-deploy
