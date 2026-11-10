@@ -2,6 +2,17 @@ name: Render Metaverse backlog
 
 on:
   workflow_dispatch:
+    inputs:
+      batch:
+        description: Jobs to claim per batch (1-6)
+        default: "3"
+        type: choice
+        options: ["1", "2", "3", "4", "5", "6"]
+      budget_minutes:
+        description: Render budget, below the job timeout
+        default: "45"
+        type: choice
+        options: ["10", "20", "30", "45"]
   repository_dispatch:
     types: [render-metaverse]
   schedule:
@@ -24,12 +35,12 @@ permissions:
 env:
   MV_API: ${{ vars.MV_API || 'https://metaverse-autopilot.zyyabot.workers.dev' }}
   MV_OIDC_AUDIENCE: metaverse-autopilot
-  MV_BUDGET_MIN: "45"
-  MV_BATCH: "3"
+  MV_BUDGET_MIN: ${{ inputs.budget_minutes || '45' }}
+  MV_BATCH: ${{ inputs.batch || '3' }}
 
 jobs:
   render:
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 55
     steps:
       - name: Check render backlog
@@ -37,34 +48,53 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          oidc="$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$MV_OIDC_AUDIENCE" | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])')"
+          oidc="$(curl --connect-timeout 10 --max-time 45 --retry 2 --retry-delay 2 --retry-max-time 100 -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$MV_OIDC_AUDIENCE" | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])')"
           echo "::add-mask::$oidc"
-          response="$(curl -fsS -H "Authorization: Bearer $oidc" "$MV_API/api/runner/pending")"
-          pending="$(python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("claimable", d.get("pending", 0)))' <<< "$response")"
+          response="$(curl --connect-timeout 10 --max-time 45 --retry 2 --retry-delay 2 --retry-max-time 100 -fsS -H "Authorization: Bearer $oidc" "$MV_API/api/runner/pending")"
+          pending="$(python3 -c 'import json,sys; d=json.load(sys.stdin); n=d.get("claimable", d.get("pending")); assert isinstance(n,int) and not isinstance(n,bool) and n >= 0, "Invalid pending count"; print(n)' <<< "$response")"
           echo "Claimable render jobs: $pending"
           if [ "$pending" -gt 0 ]; then echo 'run=true' >> "$GITHUB_OUTPUT"; else echo 'run=false' >> "$GITHUB_OUTPUT"; fi
 
       - name: Checkout only renderer modules from private source
         if: steps.backlog.outputs.run == 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: MohiZia/Metaverse
           ref: main
           token: ${{ secrets.RENDER_SOURCE_TOKEN }}
           path: renderer-source
+          persist-credentials: false
           sparse-checkout: |
             scripts/render_short.py
             scripts/story_renderer.py
             scripts/kids_music.py
             scripts/sfx.py
+            scripts/html_video
+            video
           sparse-checkout-cone-mode: false
+
+      - name: Set up Python
+        if: steps.backlog.outputs.run == 'true'
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node for HTML video tasks
+        if: steps.backlog.outputs.run == 'true'
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: renderer-source/video/package-lock.json
 
       - name: Install renderer dependencies
         if: steps.backlog.outputs.run == 'true'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg fonts-dejavu-core > /dev/null
+          sudo apt-get install -y -qq ffmpeg fonts-dejavu-core megatools > /dev/null
           python3 -m pip install --disable-pip-version-check -q edge-tts gTTS pillow numpy
+          npm ci --prefix renderer-source/video --ignore-scripts
+          python3 -m compileall -q renderer-source/scripts
 
       - name: Render and upload queued videos
         if: steps.backlog.outputs.run == 'true'
@@ -72,3 +102,18 @@ jobs:
         env:
           PYTHONPATH: scripts
         run: python3 scripts/render_short.py
+
+      - name: Report render outcome
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+          BACKLOG_RUN: ${{ steps.backlog.outputs.run }}
+        shell: bash
+        run: |
+          {
+            echo "### Metaverse renderer"
+            echo "- Job status: $JOB_STATUS"
+            echo "- Claimable backlog found: ${BACKLOG_RUN:-unknown}"
+            echo "- Batch size: $MV_BATCH; budget: $MV_BUDGET_MIN minutes"
+            echo "- Per-video success/failure is reported to the Worker by the renderer."
+          } >> "$GITHUB_STEP_SUMMARY"
