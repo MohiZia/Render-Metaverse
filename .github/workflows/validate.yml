@@ -1,0 +1,21 @@
+name: Validate workflow contracts
+on:
+  pull_request:
+  push:
+    branches: [main]
+    paths: [".github/**"]
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: python -m pip install PyYAML==6.0.3
+      - run: python -m unittest discover -s .github/tests -p 'test_*.py'

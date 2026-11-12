@@ -13,6 +13,16 @@ on:
         default: "45"
         type: choice
         options: ["10", "20", "30", "45"]
+      render_profile:
+        description: Story visuals (existing per-video settings take priority)
+        default: balanced
+        type: choice
+        options: [balanced, cinematic, expressive, reduced_motion]
+      narration_style:
+        description: Story narration fallback (preserves explicit per-video tone)
+        default: per_video
+        type: choice
+        options: [per_video, narrative, funny, quote, poetry, romance, sad]
   repository_dispatch:
     types: [render-metaverse]
   schedule:
@@ -35,14 +45,32 @@ permissions:
 env:
   MV_API: ${{ vars.MV_API || 'https://metaverse-autopilot.zyyabot.workers.dev' }}
   MV_OIDC_AUDIENCE: metaverse-autopilot
-  MV_BUDGET_MIN: ${{ inputs.budget_minutes || '45' }}
-  MV_BATCH: ${{ inputs.batch || '3' }}
+  MV_BUDGET_MIN: ${{ inputs.budget_minutes || github.event.client_payload.budget_minutes || '45' }}
+  MV_RENDER_PROFILE: ${{ inputs.render_profile || github.event.client_payload.render_profile || 'balanced' }}
+  MV_NARRATION_STYLE: ${{ inputs.narration_style || github.event.client_payload.narration_style || 'per_video' }}
+  MV_BATCH: ${{ inputs.batch || github.event.client_payload.batch || '3' }}
 
 jobs:
   render:
     runs-on: ubuntu-24.04
     timeout-minutes: 55
     steps:
+      - name: Validate render controls
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os
+          allowed = {
+              "MV_RENDER_PROFILE": {"balanced", "cinematic", "expressive", "reduced_motion"},
+              "MV_NARRATION_STYLE": {"per_video", "narrative", "funny", "quote", "poetry", "romance", "sad"},
+              "MV_BATCH": {str(n) for n in range(1, 7)},
+              "MV_BUDGET_MIN": {"10", "20", "30", "45"},
+          }
+          for key, values in allowed.items():
+              if os.environ.get(key) not in values:
+                  raise SystemExit(f"Invalid {key}; select a supported workflow input")
+          PY
+
       - name: Check render backlog
         id: backlog
         shell: bash
@@ -66,6 +94,7 @@ jobs:
           persist-credentials: false
           sparse-checkout: |
             scripts/render_short.py
+            scripts/render_profiles.py
             scripts/story_renderer.py
             scripts/kids_music.py
             scripts/sfx.py
@@ -94,6 +123,8 @@ jobs:
           sudo apt-get install -y -qq ffmpeg fonts-dejavu-core megatools > /dev/null
           python3 -m pip install --disable-pip-version-check -q edge-tts gTTS pillow numpy
           npm ci --prefix renderer-source/video --ignore-scripts
+          mkdir -p ~/.cache/mvfonts
+          curl --connect-timeout 10 --max-time 45 --retry 2 -fsSL -o ~/.cache/mvfonts/Fredoka.ttf "https://github.com/google/fonts/raw/main/ofl/fredoka/Fredoka%5Bwdth,wght%5D.ttf" || echo "::warning::Fredoka unavailable; using installed DejaVu font"
           python3 -m compileall -q renderer-source/scripts
 
       - name: Render and upload queued videos
@@ -114,6 +145,7 @@ jobs:
             echo "### Metaverse renderer"
             echo "- Job status: $JOB_STATUS"
             echo "- Claimable backlog found: ${BACKLOG_RUN:-unknown}"
+            echo "- Story profile: $MV_RENDER_PROFILE; narration fallback: $MV_NARRATION_STYLE"
             echo "- Batch size: $MV_BATCH; budget: $MV_BUDGET_MIN minutes"
             echo "- Per-video success/failure is reported to the Worker by the renderer."
           } >> "$GITHUB_STEP_SUMMARY"
