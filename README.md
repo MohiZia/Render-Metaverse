@@ -16,7 +16,7 @@ Manual or `render-metaverse` repository dispatch runs accept:
 
 Profiles control story transitions, camera movement, caption entrance and particles.
 Reduced motion disables transitions, camera animation and caption entrances; title/portrait
-idle motion remains format-dependent. Explicit per-video settings take priority.
+idle motion is also disabled. Explicit per-video settings take priority.
 Existing non-story/HTML rendering paths remain unchanged. Voice profiles adjust
 supported rate/pitch, not provider emotion models; fallback TTS may sound different.
 
