@@ -13,6 +13,14 @@ on:
         default: "45"
         type: choice
         options: ["10", "20", "30", "45"]
+      content_id:
+        description: Optional single content UUID (does not requeue failed content)
+        default: ""
+        type: string
+      max_videos:
+        description: Optional total claimed-video cap (1-100); empty uses existing budget
+        default: ""
+        type: string
       render_profile:
         description: Story visuals (existing per-video settings take priority)
         default: balanced
@@ -36,7 +44,7 @@ permissions:
   contents: read
   id-token: write
 
-# This public repository intentionally contains only this workflow.
+# This public repository contains workflow configuration and generic contract tests only.
 # Runtime requirement: RENDER_SOURCE_TOKEN is an encrypted GitHub token that can
 # read MohiZia/Metaverse. Worker access uses short-lived GitHub OIDC instead of
 # a long-lived Worker token.
@@ -45,6 +53,9 @@ permissions:
 env:
   MV_API: ${{ vars.MV_API || 'https://metaverse-autopilot.zyyabot.workers.dev' }}
   MV_OIDC_AUDIENCE: metaverse-autopilot
+  PYTHONUNBUFFERED: "1"
+  MV_CONTENT_ID: ${{ inputs.content_id || format('{0}', github.event.client_payload.content_id) }}
+  MV_MAX_VIDEOS: ${{ inputs.max_videos || format('{0}', github.event.client_payload.max_videos) }}
   MV_BUDGET_MIN: ${{ inputs.budget_minutes || github.event.client_payload.budget_minutes || '45' }}
   MV_RENDER_PROFILE: ${{ inputs.render_profile || github.event.client_payload.render_profile || 'balanced' }}
   MV_NARRATION_STYLE: ${{ inputs.narration_style || github.event.client_payload.narration_style || 'per_video' }}
@@ -60,6 +71,8 @@ jobs:
         run: |
           python3 - <<'PY'
           import os
+          import re
+          import uuid
           allowed = {
               "MV_RENDER_PROFILE": {"balanced", "cinematic", "expressive", "reduced_motion"},
               "MV_NARRATION_STYLE": {"per_video", "narrative", "funny", "quote", "poetry", "romance", "sad"},
@@ -69,6 +82,17 @@ jobs:
           for key, values in allowed.items():
               if os.environ.get(key) not in values:
                   raise SystemExit(f"Invalid {key}; select a supported workflow input")
+          content_id = os.environ.get("MV_CONTENT_ID", "")
+          if content_id:
+              try:
+                  canonical = str(uuid.UUID(content_id))
+              except ValueError:
+                  raise SystemExit("Invalid MV_CONTENT_ID; use a canonical content UUID")
+              if canonical != content_id.lower():
+                  raise SystemExit("Invalid MV_CONTENT_ID; use a canonical content UUID")
+          max_videos = os.environ.get("MV_MAX_VIDEOS", "")
+          if max_videos and (not re.fullmatch(r"[0-9]+", max_videos) or not 1 <= int(max_videos) <= 100):
+              raise SystemExit("Invalid MV_MAX_VIDEOS; use an integer from 1 to 100")
           PY
 
       - name: Check render backlog
@@ -84,6 +108,7 @@ jobs:
           if [ "$pending" -gt 0 ]; then echo 'run=true' >> "$GITHUB_OUTPUT"; else echo 'run=false' >> "$GITHUB_OUTPUT"; fi
 
       - name: Checkout only renderer modules from private source
+        id: source
         if: steps.backlog.outputs.run == 'true'
         uses: actions/checkout@v6
         with:
@@ -127,6 +152,26 @@ jobs:
           curl --connect-timeout 10 --max-time 45 --retry 2 -fsSL -o ~/.cache/mvfonts/Fredoka.ttf "https://github.com/google/fonts/raw/main/ofl/fredoka/Fredoka%5Bwdth,wght%5D.ttf" || echo "::warning::Fredoka unavailable; using installed DejaVu font"
           python3 -m compileall -q renderer-source/scripts
 
+      - name: Preflight sparse renderer imports
+        if: steps.backlog.outputs.run == 'true'
+        working-directory: renderer-source
+        env:
+          PYTHONPATH: scripts
+        shell: bash
+        run: |
+          # Compileall checks syntax, not missing sparse-checkout dependencies.
+          # Import only: never call main(), claim a job or contact the Worker here.
+          python3 - <<'PY'
+          import importlib
+          import shutil
+          for module in ("render_profiles", "kids_music", "sfx", "story_renderer", "html_video", "render_short"):
+              importlib.import_module(module)
+              print(f"Renderer import OK: {module}")
+          for binary in ("ffmpeg", "ffprobe"):
+              if not shutil.which(binary):
+                  raise SystemExit(f"Missing required renderer executable: {binary}")
+          PY
+
       - name: Render and upload queued videos
         if: steps.backlog.outputs.run == 'true'
         working-directory: renderer-source
@@ -139,13 +184,16 @@ jobs:
         env:
           JOB_STATUS: ${{ job.status }}
           BACKLOG_RUN: ${{ steps.backlog.outputs.run }}
+          SOURCE_REVISION: ${{ steps.source.outputs.commit }}
         shell: bash
         run: |
           {
             echo "### Metaverse renderer"
             echo "- Job status: $JOB_STATUS"
+            echo "- Private source revision: ${SOURCE_REVISION:-not checked out}"
             echo "- Claimable backlog found: ${BACKLOG_RUN:-unknown}"
             echo "- Story profile: $MV_RENDER_PROFILE; narration fallback: $MV_NARRATION_STYLE"
             echo "- Batch size: $MV_BATCH; budget: $MV_BUDGET_MIN minutes"
+            echo "- Content filter: ${MV_CONTENT_ID:-none}; total claimed-video cap: ${MV_MAX_VIDEOS:-budget only}"
             echo "- Per-video success/failure is reported to the Worker by the renderer."
           } >> "$GITHUB_STEP_SUMMARY"
